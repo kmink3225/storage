@@ -1,0 +1,222 @@
+---
+title: "FunctionList"
+author: "Kwangmin Kim"
+date: '2021 9 14 '
+output: html_document
+---
+```{r}
+#Length to Scale Ratio
+lsr_f=function(x){
+  return(sum(abs(diff(x)))/(max(x)-min(x)))
+}
+
+#moving average
+ma <- function(x, n){
+  stats::filter(x, rep(1/n, n), sides = 2)
+}
+
+#Compute Difference
+f.diff <- function(x, y) {
+  if (length(x)!=length(y)) {
+    stop('length(x) != length(y)')
+  }
+  n <- length(x)
+  fdx <- vector(length = n)
+  for (i in 2:n) {
+    fdx[i-1]<-(y[i-1]-y[i])/(x[i-1]-x[i])
+  }
+  
+  fdx[n]<-(y[n]-y[n-1])/(x[n]-x[n - 1])
+  return(fdx)
+}
+
+#Customized Scale
+my_scale_f=function(a,b,x){
+  return((b-a)*(x-min(x))/(max(x)-min(x))+a)
+}
+
+#Cumulative Function for making an animation
+cumlF<- function(dat,var){
+  var<-lazyeval::f_eval(var, dat)
+  lvl<-plotly:::getLevels(var)
+  dats<-lapply(seq_along(lvl),function(x){
+    cbind(dat[var%in%lvl[seq(1,x)],],frame=lvl[[x]])
+  })
+  dplyr::bind_rows(dats)
+}
+
+```
+
+```{r animation}
+# ggplotly + animation
+sig_aniF=function(i_id,i_test,i_rep){
+ggplotly(ggplot(data=long_ma_data%>%
+           filter(id==i_id,test==i_test,rep==1)%>%
+           # gather(key=ma,value=value,rfu:ma5_rfu)%>%
+  group_by(rep,dye,well,smoothing)%>%
+  mutate(n=1:n(),
+         n=n,
+         rep=factor(rep))%>%
+    cumlF(~n)%>%ungroup(),
+  aes(x=cycles,y=value,color=smoothing,group=smoothing,frame=frame))+
+    geom_point(size=0.1,alpha=0.2)+geom_line()+facet_wrap(.~dye+well,ncol = 3)+
+  theme(axis.text.x = element_text(angle=90))+
+    labs(title=paste0("Signals with Smoothing ","BaseID: ",i_id,", Test: ", i_test,", Repeated:", i_rep)))%>%
+  animation_opts(
+    50,easing = "exp",transition=0,redraw = TRUE #easing="elastic"
+  )%>%
+   animation_button(
+    x = 1, xanchor = "right", y = 0, yanchor = "bottom"
+  )%>%
+  animation_slider(
+    currentvalue = list(prefix = "Cycle ", font = list(color="red"))
+  )
+}
+
+# different animation
+d=rbind(long_ma_data%>%filter(smoothing=="rfu",rep==1)%>%ungroup%>%
+  group_by(id,date,rep,smoothing,dye,well)%>%
+  mutate(n=1:n())%>%dplyr::select(id:cycles,n,value)%>%ungroup()%>%
+  nest_by(id,date,rep,dye,well)%>%ungroup()%>%unnest(data),
+  long_ma_data%>%filter(smoothing!="rfu",rep==1)%>%ungroup%>%
+    group_by(id,date,rep,dye,well)%>%mutate(n=1:n())%>%
+    dplyr::select(id,date,rep,smoothing,dye,well,test,pass,cycles,n,value))
+
+dat <- d%>%
+  crossing(center = unique(d$n))%>%
+  mutate(dist = abs(n - center)) %>%
+  filter(rank(dist) / n() <= 0.25) %>%
+  mutate(weight = (1 - (dist / max(dist)) ^ 3) ^ 3)
+
+
+
+p1= ggplot(dat, aes(n, value)) +
+  geom_line(aes(y = .fitted), data = fit_lm, color = "brown",size=3)+
+  geom_point(aes(alpha = weight, frame = center)) +
+  geom_smooth(aes(group = center, frame = center, weight = weight), method = "lm", se = FALSE,color="orange") +
+  geom_vline(aes(xintercept = center, frame = center), lty = 2)+
+  ggtitle("cycle=")
+  
+
+p2 = ggplot(dat, aes(n, value)) +
+  geom_line(aes(y = .fitted), data = fit_quad, color = "blue",size=3)+
+  geom_point(aes(alpha = weight, frame = center)) +
+  geom_smooth(aes(group = center, frame = center, weight = weight), method = "loess", se = FALSE,color="lightblue") +
+  geom_smooth(aes(group = center, frame = center, weight = weight), method = "lm", se = FALSE,color="orange") +
+  ggtitle("cycle=")
+
+
+gganimate(p1)
+gganimate(p2)
+
+
+fits <- tibble(span = seq(0.05, 1, .05)) %>%
+  group_by(span) %>%
+  do(augment(loess(value ~ n, d, degree = 1, span = .$span)))
+
+p <- ggplot(fits, aes(n, value, frame = span)) +
+  geom_point() +
+  geom_line(aes(y = .fitted), color = "red") +
+  ggtitle("span = ")
+
+gganimate(p)
+
+spans <- c(.25, .5, .75, 1)
+
+# create loess fits, one for each span
+fits <- tibble(span = spans) %>%
+  group_by(span) %>%
+  do(augment(loess(value ~ n, d, degree = 1, span = .$span)))
+
+# calculate weights to reproduce this with local weighted fits
+dat <- d%>%
+  crossing(span = spans, center = unique(d$n)) %>%
+  mutate(dist = abs(n - center)) %>%
+  filter(rank(dist) / n() <= span) %>%
+  mutate(weight = (1 - (dist / max(dist)) ^ 3) ^ 3)
+
+# create faceted plot with changing points, local linear fits, and vertical lines,
+# and constant hollow points and loess fit
+p <- ggplot(dat, aes(x=n, y=value)) +
+  geom_point(aes(alpha = weight, frame = center)) +
+  geom_smooth(aes(group = center, frame = center, weight = weight), method = "lm", se = FALSE) +
+  geom_vline(aes(xintercept = center, frame = center), lty = 2) +
+  geom_point(shape = 1, data = d, alpha = .25,size=2) +
+  geom_line(aes(y = .fitted, frame = n, cumulative = TRUE), data = fits, color = "red") +
+  facet_wrap(~span) +
+  ggtitle("cycle = ")
+
+gganimate(p)
+
+```
+
+```{r smoothing}
+cmprsnF=function(i_id,i_dye,i_well){
+mod_lm =loess(value ~ n, d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well), degree = 1, span = .3)
+mod_quad =loess(value ~ n, d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well), degree = 2, span = .3)
+ksmth3=with(d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well),
+           ksmooth(n, value, kernel = "normal", bandwidth = 3,n.points = length(n)))
+ksmth4=with(d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well),
+           ksmooth(n, value, kernel = "normal", bandwidth = 4,n.points = length(n)))
+ksmth5=with(d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well),
+           ksmooth(n, value, kernel = "normal", bandwidth = 5,n.points = length(n)))
+mod_spline4=lm(value~bs(n,knots=10,20,35,41),data=d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well))
+mod_splineDf3=with(d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well),
+     smooth.spline(n,value,df=3))
+modGamDefault=gam(value~n,data=d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well))
+modGamCR=gam(value~s(n,bs="cr"),data=d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well))
+modGamPS=gam(value~s(n,bs="ps"),data=d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well))
+modGamGP=gam(value~s(n,bs="gp"),data=d%>%filter(rep==1,smoothing=="rfu",id==i_id,dye==i_dye,well==i_well))
+
+
+fit=rbind(augment(mod_lm)%>%mutate(degree="loess1")%>%dplyr::select(-value,-.resid)%>%rename(value=.fitted),
+          augment(mod_quad)%>%mutate(degree="loess2")%>%dplyr::select(-value,-.resid)%>%rename(value=.fitted),
+          d%>%filter(rep==1,smoothing=="ma3_rfu",id==i_id,dye==i_dye,well==i_well)%>%dplyr::select(n,value)%>%mutate(degree="ma3"),
+          d%>%filter(rep==1,smoothing=="ma4_rfu",id==i_id,dye==i_dye,well==i_well)%>%dplyr::select(n,value)%>%mutate(degree="ma4"),
+          d%>%filter(rep==1,smoothing=="ma5_rfu",id==i_id,dye==i_dye,well==i_well)%>%dplyr::select(n,value)%>%mutate(degree="ma5"),
+          tibble(n=ksmth3[[1]],value=ksmth3[[2]])%>%mutate(degree="ksmth3"),
+          tibble(n=ksmth4[[1]],value=ksmth4[[2]])%>%mutate(degree="ksmth4"),
+          tibble(n=ksmth5[[1]],value=ksmth5[[2]])%>%mutate(degree="ksmth5"),
+          data.frame(value=mod_spline4$fitted.values)%>%mutate(n=rownames(.),degree="spline4")%>%dplyr::select(n,value,degree),
+          data.frame(n=mod_splineDf3$x,value=mod_splineDf3$y)%>%mutate(degree="splineDF3"),
+          data.frame(n=modGamDefault$model$n,value=modGamDefault$fitted.values)%>%mutate(degree="gamDefault"),
+          data.frame(n=modGamCR$model$n,value=modGamCR$fitted.values)%>%mutate(degree="gamCR"),
+          data.frame(n=modGamPS$model$n,value=modGamPS$fitted.values)%>%mutate(degree="gamPS"),
+          data.frame(n=modGamGP$model$n,value=modGamGP$fitted.values)%>%mutate(degree="gamGP"),
+          augment(mod_quad)%>%dplyr::select(n,value)%>%mutate(degree="raw"))%>%mutate(n=rep(1:45,15))
+
+
+p=ggplotly(ggplot(data=fit,aes(x=n, y=value, color=degree,shape=degree))+
+  geom_point(size=0.5) +
+  geom_line(aes(linetype =fit$degree))+
+  scale_linetype_manual(values=c("raw"=1,"loess1"=2,"loess2"=3,"ma3"=4,
+                              "ma4"=5,"ma5"=6,"ksmth3"=7,"ksmth4"=8,"ksmth5"=9,
+                              "spline4"=10,"splineDF3"=11,"gamDefault"=12,"gamCR"=13,"gamPS"=14,"gamGP"=15))+
+  scale_color_manual(values=c("raw"="black","loess1"="coral3","loess2"="cornsilk4","ma3"="darkgoldenrod",
+                              "ma4"="darkmagenta","ma5"="darkorange","ksmth3"="darkorchid2","ksmth4"="darkseagreen1","ksmth5"="deeppink",
+                              "spline4"="deepskyblue2","splineDF3"="dodgerblue4","gamDefault"="gainsboro","gamCR"="goldenrod1","gamPS"="green3","gamGP"="honeydew4"))+
+    labs(title=paste("Smoothing Line Comparisons",i_id,i_dye,sep="_")))
+return(p)
+}
+cmprsnF("BR203713","cRed","A9") #loess2, ma3, spline4, gamGP
+```
+
+```{r purrMapFunction}
+smth_data=
+  rbind(
+    long_ma_data,
+    long_ma_data%>%filter(smoothing=="rfu")%>%ungroup%>%
+      group_by(id,date,rep,dye,well)%>%
+      mutate(n=1:n())%>%dplyr::select(id:cycles,n,value)%>%ungroup()%>%
+      nest_by(id,date,rep,dye,well)%>%ungroup()%>%
+      mutate(loess3=purrr::map(data,~loess(value~n,data=.x,degree=2,span=0.15)%>%fitted))%>%
+      unnest(loess3)%>%dplyr::select(-data)%>%group_by(id,rep,dye,well)%>%
+      mutate(n=1:n(),
+             cycles=ifelse(n%in%1:9,paste0("cycle0",n),paste0("cycle",n)))%>%
+      mutate(smoothing="loess3")%>%rename(rfu=loess3)%>%
+      rename(value=rfu)%>%dplyr::select(-n)%>%ungroup())%>%
+  mutate(test=ifelse(grepl("A",well),"pc","nc"))%>%ungroup%>%
+  group_by(id,rep,dye,smoothing,well)%>%
+  mutate(n=1:n())%>%ungroup()
+```
+
